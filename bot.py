@@ -1,87 +1,87 @@
-import logging
 import os
+import logging
+from telegram import Update, ForceReply, Bot
+from telegram.ext import Updater, CommandHandler, CallbackContext, MessageHandler, Filters
 from pymongo import MongoClient
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from flask import Flask, jsonify
+from threading import Thread
 
 # Enable logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# Load environment variables
-ADMIN_IDS = list(map(int, os.getenv('ADMIN_IDS', '').split(',')))
-DUMP_CHANNEL = os.getenv('DUMP_CHANNEL')
-FORCE_CHANNELS = list(map(str, os.getenv('FORCE_CHANNELS', '').split(',')))
+# MongoDB Setup
+mongo_client = MongoClient(os.getenv("MONGO_URI"))
+db = mongo_client['file_management']
+users_collection = db['users']  # To store user data
+files_collection = db['files']  # To store file metadata
 
-# MongoDB connection
-mongo_uri = os.getenv('MONGO_URI')  # Your MongoDB URI
-client = MongoClient(mongo_uri)
-db = client['telegram_bot_db']  # Your database name
-users_collection = db['users']  # Collection for user data
-files_collection = db['files']  # Collection for files data
+# Telegram setup
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+DUMP_CHANNEL_ID = os.getenv("DUMP_CHANNEL_ID")  # ID or username of the dump channel
+ADMINS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS").split(',')]
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    user_name = update.effective_user.first_name
-    
-    # Register or update user in the database
-    users_collection.update_one({'user_id': user_id}, {'$set': {'username': user_name}}, upsert=True)
+# Initialize Flask app
+app = Flask(__name__)
 
-    await update.message.reply_text(f'Hello {user_name}! Welcome to the bot.')
+# Start command handler
+def start(update: Update, context: CallbackContext) -> None:
+    user = update.message.from_user
+    update.message.reply_text(
+        f'Hello, {user.first_name}! Welcome to the file management bot. Use /help to see available commands.',
+        reply_markup=ForceReply(selective=True),
+    )
 
-async def upload_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("You do not have permission to upload files.")
-        return
-    
-    if update.message.document:
-        document = update.message.document
-        file_id = document.file_id
-        file_name = document.file_name
+# Help command handler
+def help_command(update: Update, context: CallbackContext):
+    update.message.reply_text('Available commands:\n/start - Start the bot\n/help - Show help\n/upload - Upload a file (admins only)')
 
-        # Send the file to the dump channel
-        await context.bot.send_document(chat_id=DUMP_CHANNEL, document=document)
+# Command to upload files (limited to admins)
+def upload_file(update: Update, context: CallbackContext):
+    if update.message.from_user.id in ADMINS:
+        update.message.reply_text("Please send me the file you'd like to upload.")
+    else:
+        update.message.reply_text("You are not authorized to upload files.")
 
-        # Store file info in the database
+# Handle incoming documents (for admin file uploads)
+def handle_document(update: Update, context: CallbackContext):
+    if update.message.from_user.id in ADMINS:
+        file = update.message.document.get_file()
+        
+        # Upload file to private dump channel
+        file_path = file.file_path
+        new_file = context.bot.send_document(chat_id=DUMP_CHANNEL_ID, document=file)
+        
+        # Save file metadata to MongoDB
         files_collection.insert_one({
-            'file_id': file_id,
-            'file_name': file_name,
-            'uploaded_by': update.effective_user.id
+            'file_name': update.message.document.file_name,
+            'file_id': new_file.document.file_id,
+            'user_id': update.message.from_user.id
         })
+        
+        update.message.reply_text(f"File '{update.message.document.file_name}' uploaded to the dump channel and stored.")
+    else:
+        update.message.reply_text("You are not authorized to upload files.")
 
-        # Generate a permanent link here (you may need to implement this)
-        link = f"https://your-heroku-app.herokuapp.com/file/{file_id}"  # Example link generation
-        await update.message.reply_text(f"File uploaded successfully! Here's the link: {link}")
+# Health check route
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify(status='OK')
 
-async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("You do not have permission to broadcast messages.")
-        return
-
-    message = " ".join(context.args)
-    users = users_collection.find()
-    for user in users:
-        await context.bot.send_message(chat_id=user['user_id'], text=message)
-
-async def view_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    total_users = users_collection.count_documents({})
-    total_files = files_collection.count_documents({})
-    
-    await update.message.reply_text(f"Total Users: {total_users}\nTotal Files Uploaded: {total_files}")
-
-def main():
-    application = ApplicationBuilder().token("YOUR_TOKEN").build()  # Replace with your bot token
+def main() -> None:
+    # Setup the bot
+    updater = Updater(TELEGRAM_TOKEN)
 
     # Register handlers
-    application.add_handler(CommandHandler('start', start))
-    application.add_handler(MessageHandler(filters.Document.ALL, upload_file))  # Change Filters to filters
-    application.add_handler(CommandHandler('broadcast', broadcast_message))
-    application.add_handler(CommandHandler('stats', view_stats))  # Command to show stats
+    updater.dispatcher.add_handler(CommandHandler('start', start))
+    updater.dispatcher.add_handler(CommandHandler('help', help_command))
+    updater.dispatcher.add_handler(CommandHandler('upload', upload_file))
+    updater.dispatcher.add_handler(MessageHandler(Filters.document, handle_document))
 
     # Start polling for updates
-    application.run_polling()
+    updater.start_polling()
+    updater.idle()
 
 if __name__ == '__main__':
-    main()
+    # Start both Flask and the Telegram bot in the same process
+    Thread(target=main).start()
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
