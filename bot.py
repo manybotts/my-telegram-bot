@@ -1,115 +1,169 @@
 import os
 import logging
-from telegram import Update, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, CallbackContext, MessageHandler, Filters
+from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackQueryHandler
+from telegram.ext import CallbackContext
+from telegram.utils.helpers import escape_markdown
+from dotenv import load_dotenv
 from pymongo import MongoClient
-from flask import Flask, jsonify
-from threading import Thread
+from bson import ObjectId
 
-# Enable logging
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+# Load environment variables from .env file
+load_dotenv()
 
-# MongoDB Setup
-mongo_client = MongoClient(os.getenv("MONGO_URI"))
-db = mongo_client['file_management']
-files_collection = db['files']  # To store file metadata
+# Load MongoDB URI and Telegram Bot Token from environment variables
+MONGO_URI = os.getenv('MONGO_URI')
+BOT_API_TOKEN = os.getenv('BOT_API_TOKEN')
+ADMIN_IDS = os.getenv('ADMIN_IDS').split(',')
+FORCE_SUB_CHANNEL_1_ID = os.getenv('FORCE_SUB_CHANNEL_1_ID')
+FORCE_SUB_CHANNEL_2_ID = os.getenv('FORCE_SUB_CHANNEL_2_ID')
+DUMP_CHANNEL_ID = os.getenv('DUMP_CHANNEL_ID')
 
-# Telegram setup
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-DUMP_CHANNEL_ID = os.getenv("DUMP_CHANNEL_ID")  # Private dump channel ID
-SUB_CHANNEL_1 = os.getenv("SUB_CHANNEL_1")  # First force sub channel ID
-SUB_CHANNEL_2 = os.getenv("SUB_CHANNEL_2")  # Second force sub channel ID
-ADMINS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS").split(',')]
-TELEGRAM_USERNAME = os.getenv("TELEGRAM_USERNAME")  # Your bot's username without '@'
+# Setup MongoDB connection
+client = MongoClient(MONGO_URI)
+db = client.get_database()
+users_collection = db.users
 
-# Initialize Flask app
-app = Flask(__name__)
+# Initialize the bot
+bot = Bot(BOT_API_TOKEN)
 
-def start(update: Update, context: CallbackContext) -> None:
-    user = update.message.from_user
-    update.message.reply_text(
-        f'Hello, {user.first_name}! Welcome to the file management bot. Use /help to see available commands.',
-        reply_markup=ForceReply(selective=True),
-    )
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                    level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-def help_command(update: Update, context: CallbackContext):
-    update.message.reply_text("Available commands:\n/start - Start the bot\n/help - Show help\n/upload - Upload a file (admins only)")
+def is_admin(user_id):
+    """Check if the user is an admin."""
+    return str(user_id) in ADMIN_IDS
 
-def upload_file(update: Update, context: CallbackContext):
-    if update.message.from_user.id in ADMINS:
-        update.message.reply_text("Please send me the file(s) you'd like to upload.")
-    else:
-        update.message.reply_text("You are not authorized to upload files.")
+def store_user_info(user_id, username):
+    """Store user info in MongoDB."""
+    if users_collection.find_one({"user_id": user_id}) is None:
+        users_collection.insert_one({"user_id": user_id, "username": username})
 
-def handle_document(update: Update, context: CallbackContext):
-    if update.message.from_user.id in ADMINS:
-        document = update.message.document
-        new_file = context.bot.send_document(chat_id=DUMP_CHANNEL_ID, document=document)
-        files_collection.insert_one({
-            'file_name': document.file_name,
-            'file_id': new_file.document.file_id,
-            'user_id': update.message.from_user.id
-        })
-        
-        update.message.reply_text("File(s) uploaded to the dump channel and stored.")
-    else:
-        update.message.reply_text("You are not authorized to upload files.")
-
-def generate_link(file_id):
-    return f"https://t.me/{TELEGRAM_USERNAME}/{file_id}"
-
-def handle_retrieve_file(update: Update, context: CallbackContext):
+def start(update: Update, context: CallbackContext):
+    """Command to start the bot and welcome the user."""
     user_id = update.message.from_user.id
-    # Check if user is subscribed
-    if not is_user_subscribed(context, user_id):
-        send_subscription_buttons(context, update.message.chat_id)
+    store_user_info(user_id, update.message.from_user.username)
+    update.message.reply_text("Hello! I am a file management bot. Only admins can upload and generate links.")
+
+def handle_files(update: Update, context: CallbackContext):
+    """Handle file uploads from admins."""
+    user_id = update.message.from_user.id
+    if not is_admin(user_id):
+        update.message.reply_text("You are not authorized to upload files.")
         return
 
-    file_name = context.args[0] if context.args else None  # Pass the file identifier as an argument
-    file_data = files_collection.find_one({"file_name": file_name})
+    if update.message.document:
+        # Handle single file upload
+        file = update.message.document
+        file_id = file.file_id
+        file_name = file.file_name
 
-    if file_data:
-        context.bot.send_document(chat_id=user_id, document=file_data['file_id'])
+        # Upload the file to the dump channel
+        file_link = bot.get_file(file_id).file_url
+        bot.send_message(chat_id=DUMP_CHANNEL_ID, text=f"File uploaded: {file_name}\nLink: {file_link}")
+        update.message.reply_text(f"File uploaded successfully!\nHere is the link: {file_link}")
+
+    elif update.message.photo:
+        # Handle photo upload
+        photo = update.message.photo[-1]
+        file_id = photo.file_id
+        file_name = "photo.jpg"
+        file_link = bot.get_file(file_id).file_url
+        bot.send_message(chat_id=DUMP_CHANNEL_ID, text=f"Photo uploaded: {file_name}\nLink: {file_link}")
+        update.message.reply_text(f"Photo uploaded successfully!\nHere is the link: {file_link}")
     else:
-        update.message.reply_text("File not found!")
+        update.message.reply_text("Please send a file or photo to upload.")
 
-def is_user_subscribed(context, user_id):
-    # Check subscription for both channels
-    chat_member_1 = context.bot.get_chat_member(SUB_CHANNEL_1, user_id)
-    chat_member_2 = context.bot.get_chat_member(SUB_CHANNEL_2, user_id)
-    return chat_member_1.status in ["member", "administrator"] and chat_member_2.status in ["member", "administrator"]
+def handle_batch_files(update: Update, context: CallbackContext):
+    """Handle batch file uploads."""
+    user_id = update.message.from_user.id
+    if not is_admin(user_id):
+        update.message.reply_text("You are not authorized to upload files.")
+        return
 
-def send_subscription_buttons(context, chat_id):
-    keyboard = [
-        [InlineKeyboardButton("Join Channel 1", url=f"https://t.me/{SUB_CHANNEL_1}")],
-        [InlineKeyboardButton("Join Channel 2", url=f"https://t.me/{SUB_CHANNEL_2}")],
-        [InlineKeyboardButton("Try Again", callback_data='try_again')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    context.bot.send_message(chat_id, "You must subscribe to the following channels to access the files:", reply_markup=reply_markup)
+    # Check for multiple documents (batch upload)
+    if update.message.document:
+        batch_files = []
+        for doc in update.message.document:
+            file_id = doc.file_id
+            file_name = doc.file_name
+            file_link = bot.get_file(file_id).file_url
+            batch_files.append(f"{file_name}: {file_link}")
 
-@app.route('/health', methods=['GET'])
-def health():
-    return jsonify(status='OK')
+        # Upload the files to the dump channel as a batch
+        bot.send_message(chat_id=DUMP_CHANNEL_ID, text=f"Batch files uploaded: \n\n" + "\n".join(batch_files))
+        update.message.reply_text("Batch files uploaded successfully!\nHere are the links: \n" + "\n".join(batch_files))
 
-def main() -> None:
-    updater = Updater(TELEGRAM_TOKEN)
+def broadcast_message(update: Update, context: CallbackContext):
+    """Send broadcast messages to all users."""
+    user_id = update.message.from_user.id
+    if not is_admin(user_id):
+        update.message.reply_text("You are not authorized to broadcast messages.")
+        return
 
-    # Register handlers
-    updater.dispatcher.add_handler(CommandHandler('start', start))
-    updater.dispatcher.add_handler(CommandHandler('help', help_command))
-    updater.dispatcher.add_handler(Command Here's the continuation and completion of the updated `bot.py` code:
+    # Get the message to broadcast
+    broadcast_text = ' '.join(context.args)
+    for user in users_collection.find():
+        bot.send_message(chat_id=user["user_id"], text=broadcast_text)
 
-```python
-    updater.dispatcher.add_handler(CommandHandler('upload', upload_file))
-    updater.dispatcher.add_handler(MessageHandler(Filters.document, handle_document))
-    updater.dispatcher.add_handler(CommandHandler('retrieve', handle_retrieve_file))
+    update.message.reply_text("Message broadcasted to all users.")
 
-    # Start polling for updates
+def check_subscription(user_id, context, force_channel_ids):
+    """Check if user is subscribed to the required force sub channels."""
+    for channel_id in force_channel_ids:
+        if not bot.get_chat_member(channel_id, user_id).status in ['member', 'administrator']:
+            return False
+    return True
+
+def retrieve_file(update: Update, context: CallbackContext):
+    """Retrieve file based on the generated link."""
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    if not check_subscription(user_id, context, [FORCE_SUB_CHANNEL_1_ID, FORCE_SUB_CHANNEL_2_ID]):
+        keyboard = [
+            [
+                InlineKeyboardButton("Join Channel 1", url=f"https://t.me/{FORCE_SUB_CHANNEL_1_ID}"),
+                InlineKeyboardButton("Join Channel 2", url=f"https://t.me/{FORCE_SUB_CHANNEL_2_ID}")
+            ],
+            [InlineKeyboardButton("Try Again", callback_data="try_again")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        query.message.reply_text(
+            "You need to join both force subscription channels first to download files.",
+            reply_markup=reply_markup
+        )
+        return
+
+    # If user is subscribed, fetch file and send
+    file_id = context.args[0]
+    file = bot.get_file(file_id)
+    file.download(f"{file_id}.pdf")  # Example download location
+
+    with open(f"{file_id}.pdf", 'rb') as f:
+        update.message.reply_document(f)
+
+    query.message.reply_text(f"Here is your file {file_id}.")
+
+def try_again(update: Update, context: CallbackContext):
+    """User will try again after joining the channels."""
+    update.message.reply_text("Please wait while we check your subscription status.")
+
+def main():
+    updater = Updater(BOT_API_TOKEN, use_context=True)
+    dispatcher = updater.dispatcher
+
+    # Command Handlers
+    dispatcher.add_handler(CommandHandler('start', start))
+    dispatcher.add_handler(MessageHandler(Filters.document | Filters.photo, handle_files))
+    dispatcher.add_handler(CommandHandler('broadcast', broadcast_message))
+    dispatcher.add_handler(CallbackQueryHandler(retrieve_file, pattern='^retrieve_'))
+    dispatcher.add_handler(CallbackQueryHandler(try_again, pattern='^try_again$'))
+
+    # Start polling
     updater.start_polling()
     updater.idle()
 
 if __name__ == '__main__':
-    # Start both Flask and the Telegram bot in the same process
-    Thread(target=main).start()
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    main()
