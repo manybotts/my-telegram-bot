@@ -1,5 +1,4 @@
-python-telegram-bot==20.0        # Ensure compatibility with the Bot API
-pymongo[srv]==3.12.1             # Library to interact with MongoDB with SRV support
-Flask==2.0.3                     # Web framework for health checks
-Werkzeug==2.0.3                  # Compatible version for Flask
-gunicorn==20.0.4                 # WSGI server for Heroku
+python-telegram-bot==20.0   # Ensure compatibility with the Bot API
+pymongo==3.12.1              # Library to interact with MongoDB
+Flask==2.0.1                 # Web framework for health checks
+gunicorn==20.0.4             # WSGI server for Heroku
