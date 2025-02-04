@@ -31,13 +31,6 @@ def start(update: Update, context: CallbackContext) -> None:
 
     update.message.reply_text(f'Hello {user_name}! Welcome to the bot.')
 
-def check_subscription(user_id):
-    for channel in FORCE_CHANNELS:
-        member = context.bot.get_chat_member(channel, user_id)
-        if member.status not in ['member', 'administrator']:
-            return False
-    return True
-
 def upload_file(update: Update, context: CallbackContext) -> None:
     if update.effective_user.id not in ADMIN_IDS:
         update.message.reply_text("You do not have permission to upload files.")
@@ -95,4 +88,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-``` 3. **Create `requirements.txt`:** In the same directory, create a file named `requirements.txt` with the following content:
