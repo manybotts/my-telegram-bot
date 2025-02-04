@@ -1,7 +1,8 @@
 import os
 import logging
-from telegram import Update, ForceReply, Bot
-from telegram.ext import Updater, CommandHandler, CallbackContext, MessageHandler, Filters
+from telegram import Update
+from telegram.ext import Updater, CommandHandler, CallbackContext, MessageHandler
+from telegram.ext import filters
 from pymongo import MongoClient
 from flask import Flask, jsonify
 from threading import Thread
@@ -12,7 +13,6 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 # MongoDB Setup
 mongo_client = MongoClient(os.getenv("MONGO_URI"))
 db = mongo_client['file_management']
-users_collection = db['users']  # To store user data
 files_collection = db['files']  # To store file metadata
 
 # Telegram setup
@@ -28,7 +28,6 @@ def start(update: Update, context: CallbackContext) -> None:
     user = update.message.from_user
     update.message.reply_text(
         f'Hello, {user.first_name}! Welcome to the file management bot. Use /help to see available commands.',
-        reply_markup=ForceReply(selective=True),
     )
 
 # Help command handler
@@ -46,19 +45,14 @@ def upload_file(update: Update, context: CallbackContext):
 def handle_document(update: Update, context: CallbackContext):
     if update.message.from_user.id in ADMINS:
         file = update.message.document.get_file()
-        
-        # Upload file to private dump channel
-        file_path = file.file_path
         new_file = context.bot.send_document(chat_id=DUMP_CHANNEL_ID, document=file)
-        
-        # Save file metadata to MongoDB
         files_collection.insert_one({
             'file_name': update.message.document.file_name,
             'file_id': new_file.document.file_id,
             'user_id': update.message.from_user.id
         })
         
-        update.message.reply_text(f"File '{update.message.document.file_name}' uploaded to the dump channel and stored.")
+        update.message.reply_text(f"File '{update.message.document.file_name}' uploaded to the dump channel.")
     else:
         update.message.reply_text("You are not authorized to upload files.")
 
@@ -75,7 +69,7 @@ def main() -> None:
     updater.dispatcher.add_handler(CommandHandler('start', start))
     updater.dispatcher.add_handler(CommandHandler('help', help_command))
     updater.dispatcher.add_handler(CommandHandler('upload', upload_file))
-    updater.dispatcher.add_handler(MessageHandler(Filters.document, handle_document))
+    updater.dispatcher.add_handler(MessageHandler(filters.Document(), handle_document))
 
     # Start polling for updates
     updater.start_polling()
