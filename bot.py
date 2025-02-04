@@ -20,6 +20,7 @@ DUMP_CHANNEL_ID = os.getenv("DUMP_CHANNEL_ID")  # Private dump channel ID
 SUB_CHANNEL_1 = os.getenv("SUB_CHANNEL_1")  # First force sub channel ID
 SUB_CHANNEL_2 = os.getenv("SUB_CHANNEL_2")  # Second force sub channel ID
 ADMINS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS").split(',')]
+TELEGRAM_USERNAME = os.getenv("TELEGRAM_USERNAME")  # Your bot's username without '@'
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -42,29 +43,29 @@ def upload_file(update: Update, context: CallbackContext):
 
 def handle_document(update: Update, context: CallbackContext):
     if update.message.from_user.id in ADMINS:
-        for document in update.message.document:
-            new_file = context.bot.send_document(chat_id=DUMP_CHANNEL_ID, document=document)
-            files_collection.insert_one({
-                'file_name': document.file_name,
-                'file_id': new_file.document.file_id,
-                'user_id': update.message.from_user.id
-            })
+        document = update.message.document
+        new_file = context.bot.send_document(chat_id=DUMP_CHANNEL_ID, document=document)
+        files_collection.insert_one({
+            'file_name': document.file_name,
+            'file_id': new_file.document.file_id,
+            'user_id': update.message.from_user.id
+        })
         
         update.message.reply_text("File(s) uploaded to the dump channel and stored.")
     else:
         update.message.reply_text("You are not authorized to upload files.")
 
 def generate_link(file_id):
-    return f"https://t.me/{os.getenv('TELEGRAM_USERNAME')}/{file_id}"
+    return f"https://t.me/{TELEGRAM_USERNAME}/{file_id}"
 
 def handle_retrieve_file(update: Update, context: CallbackContext):
     user_id = update.message.from_user.id
     # Check if user is subscribed
-    if not is_user_subscribed(user_id):
-        send_subscription_buttons(update.message.chat_id)
+    if not is_user_subscribed(context, user_id):
+        send_subscription_buttons(context, update.message.chat_id)
         return
 
-    file_name = context.args[0]  # Pass the file identifier as an argument
+    file_name = context.args[0] if context.args else None  # Pass the file identifier as an argument
     file_data = files_collection.find_one({"file_name": file_name})
 
     if file_data:
@@ -72,13 +73,13 @@ def handle_retrieve_file(update: Update, context: CallbackContext):
     else:
         update.message.reply_text("File not found!")
 
-def is_user_subscribed(user_id):
+def is_user_subscribed(context, user_id):
     # Check subscription for both channels
     chat_member_1 = context.bot.get_chat_member(SUB_CHANNEL_1, user_id)
     chat_member_2 = context.bot.get_chat_member(SUB_CHANNEL_2, user_id)
     return chat_member_1.status in ["member", "administrator"] and chat_member_2.status in ["member", "administrator"]
 
-def send_subscription_buttons(chat_id):
+def send_subscription_buttons(context, chat_id):
     keyboard = [
         [InlineKeyboardButton("Join Channel 1", url=f"https://t.me/{SUB_CHANNEL_1}")],
         [InlineKeyboardButton("Join Channel 2", url=f"https://t.me/{SUB_CHANNEL_2}")],
@@ -97,8 +98,10 @@ def main() -> None:
     # Register handlers
     updater.dispatcher.add_handler(CommandHandler('start', start))
     updater.dispatcher.add_handler(CommandHandler('help', help_command))
-    updater.dispatcher.add_handler(CommandHandler('upload', ```python
-        upload_file))
+    updater.dispatcher.add_handler(Command Here's the continuation and completion of the updated `bot.py` code:
+
+```python
+    updater.dispatcher.add_handler(CommandHandler('upload', upload_file))
     updater.dispatcher.add_handler(MessageHandler(Filters.document, handle_document))
     updater.dispatcher.add_handler(CommandHandler('retrieve', handle_retrieve_file))
 
