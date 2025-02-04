@@ -1,8 +1,7 @@
 import os
 import logging
-from telegram import Update
-from telegram.ext import Updater, CommandHandler, CallbackContext, MessageHandler
-from telegram.ext import filters
+from telegram import Update, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Updater, CommandHandler, CallbackContext, MessageHandler, Filters
 from pymongo import MongoClient
 from flask import Flask, jsonify
 from threading import Thread
@@ -17,59 +16,91 @@ files_collection = db['files']  # To store file metadata
 
 # Telegram setup
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-DUMP_CHANNEL_ID = os.getenv("DUMP_CHANNEL_ID")  # ID or username of the dump channel
+DUMP_CHANNEL_ID = os.getenv("DUMP_CHANNEL_ID")  # Private dump channel ID
+SUB_CHANNEL_1 = os.getenv("SUB_CHANNEL_1")  # First force sub channel ID
+SUB_CHANNEL_2 = os.getenv("SUB_CHANNEL_2")  # Second force sub channel ID
 ADMINS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS").split(',')]
 
 # Initialize Flask app
 app = Flask(__name__)
 
-# Start command handler
 def start(update: Update, context: CallbackContext) -> None:
     user = update.message.from_user
     update.message.reply_text(
         f'Hello, {user.first_name}! Welcome to the file management bot. Use /help to see available commands.',
+        reply_markup=ForceReply(selective=True),
     )
 
-# Help command handler
 def help_command(update: Update, context: CallbackContext):
-    update.message.reply_text('Available commands:\n/start - Start the bot\n/help - Show help\n/upload - Upload a file (admins only)')
+    update.message.reply_text("Available commands:\n/start - Start the bot\n/help - Show help\n/upload - Upload a file (admins only)")
 
-# Command to upload files (limited to admins)
 def upload_file(update: Update, context: CallbackContext):
     if update.message.from_user.id in ADMINS:
-        update.message.reply_text("Please send me the file you'd like to upload.")
+        update.message.reply_text("Please send me the file(s) you'd like to upload.")
     else:
         update.message.reply_text("You are not authorized to upload files.")
 
-# Handle incoming documents (for admin file uploads)
 def handle_document(update: Update, context: CallbackContext):
     if update.message.from_user.id in ADMINS:
-        file = update.message.document.get_file()
-        new_file = context.bot.send_document(chat_id=DUMP_CHANNEL_ID, document=file)
-        files_collection.insert_one({
-            'file_name': update.message.document.file_name,
-            'file_id': new_file.document.file_id,
-            'user_id': update.message.from_user.id
-        })
+        for document in update.message.document:
+            new_file = context.bot.send_document(chat_id=DUMP_CHANNEL_ID, document=document)
+            files_collection.insert_one({
+                'file_name': document.file_name,
+                'file_id': new_file.document.file_id,
+                'user_id': update.message.from_user.id
+            })
         
-        update.message.reply_text(f"File '{update.message.document.file_name}' uploaded to the dump channel.")
+        update.message.reply_text("File(s) uploaded to the dump channel and stored.")
     else:
         update.message.reply_text("You are not authorized to upload files.")
 
-# Health check route
+def generate_link(file_id):
+    return f"https://t.me/{os.getenv('TELEGRAM_USERNAME')}/{file_id}"
+
+def handle_retrieve_file(update: Update, context: CallbackContext):
+    user_id = update.message.from_user.id
+    # Check if user is subscribed
+    if not is_user_subscribed(user_id):
+        send_subscription_buttons(update.message.chat_id)
+        return
+
+    file_name = context.args[0]  # Pass the file identifier as an argument
+    file_data = files_collection.find_one({"file_name": file_name})
+
+    if file_data:
+        context.bot.send_document(chat_id=user_id, document=file_data['file_id'])
+    else:
+        update.message.reply_text("File not found!")
+
+def is_user_subscribed(user_id):
+    # Check subscription for both channels
+    chat_member_1 = context.bot.get_chat_member(SUB_CHANNEL_1, user_id)
+    chat_member_2 = context.bot.get_chat_member(SUB_CHANNEL_2, user_id)
+    return chat_member_1.status in ["member", "administrator"] and chat_member_2.status in ["member", "administrator"]
+
+def send_subscription_buttons(chat_id):
+    keyboard = [
+        [InlineKeyboardButton("Join Channel 1", url=f"https://t.me/{SUB_CHANNEL_1}")],
+        [InlineKeyboardButton("Join Channel 2", url=f"https://t.me/{SUB_CHANNEL_2}")],
+        [InlineKeyboardButton("Try Again", callback_data='try_again')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    context.bot.send_message(chat_id, "You must subscribe to the following channels to access the files:", reply_markup=reply_markup)
+
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify(status='OK')
 
 def main() -> None:
-    # Setup the bot
     updater = Updater(TELEGRAM_TOKEN)
 
     # Register handlers
     updater.dispatcher.add_handler(CommandHandler('start', start))
     updater.dispatcher.add_handler(CommandHandler('help', help_command))
-    updater.dispatcher.add_handler(CommandHandler('upload', upload_file))
-    updater.dispatcher.add_handler(MessageHandler(filters.Document(), handle_document))
+    updater.dispatcher.add_handler(CommandHandler('upload', ```python
+        upload_file))
+    updater.dispatcher.add_handler(MessageHandler(Filters.document, handle_document))
+    updater.dispatcher.add_handler(CommandHandler('retrieve', handle_retrieve_file))
 
     # Start polling for updates
     updater.start_polling()
